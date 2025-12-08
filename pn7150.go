@@ -1675,7 +1675,7 @@ func (p *PN7150) tagEventReader() {
 			Events: unix.POLLIN,
 		}
 
-		n, err := unix.Poll([]unix.PollFd{pfd}, 1000)
+		_, err := unix.Poll([]unix.PollFd{pfd}, 5000)
 		if err != nil {
 			if err == unix.EINTR {
 				continue
@@ -1687,11 +1687,7 @@ func (p *PN7150) tagEventReader() {
 			continue
 		}
 
-		if n == 0 {
-			continue
-		}
-
-		// Call DetectTags when readable, regardless of state
+		// Call DetectTags on every cycle (both readable and timeout)
 		// The PN7150 sends notifications that must be processed to keep the FD clear
 		// and to detect tag arrivals/departures during any state
 
@@ -1700,6 +1696,7 @@ func (p *PN7150) tagEventReader() {
 			continue
 		}
 
+		// Check for new arrivals (only if we have current tags)
 		if len(currentTags) > 0 {
 			for _, currentTag := range currentTags {
 				found := false
@@ -1734,45 +1731,46 @@ func (p *PN7150) tagEventReader() {
 					}
 				}
 			}
+		}
 
-			// Check for departures
-			for _, prevTag := range previousTags {
-				found := false
-				for _, currentTag := range currentTags {
-					if tagsEqual(&prevTag, &currentTag) {
-						found = true
-						break
-					}
+		// Check for departures (ALWAYS check, even if currentTags is empty)
+		for _, prevTag := range previousTags {
+			found := false
+			for _, currentTag := range currentTags {
+				if tagsEqual(&prevTag, &currentTag) {
+					found = true
+					break
 				}
-				if !found {
-					// Check if we're still supposed to be running before sending events
-					if !p.tagEventReaderRunning {
-						if p.logCallback != nil {
-							p.logCallback(LogLevelDebug, "Tag event reader stopping, skipping departure event")
-						}
-						return
+			}
+			if !found {
+				// Check if we're still supposed to be running before sending events
+				if !p.tagEventReaderRunning {
+					if p.logCallback != nil {
+						p.logCallback(LogLevelDebug, "Tag event reader stopping, skipping departure event")
 					}
-					tagCopy := prevTag
-					event := TagEvent{
-						Type: TagDeparture,
-						Tag:  &tagCopy,
+					return
+				}
+				tagCopy := prevTag
+				event := TagEvent{
+					Type: TagDeparture,
+					Tag:  &tagCopy,
+				}
+				select {
+				case p.tagEventChan <- event:
+					if p.logCallback != nil {
+						p.logCallback(LogLevelInfo, fmt.Sprintf("Tag departed: %X", prevTag.ID))
 					}
-					select {
-					case p.tagEventChan <- event:
-						if p.logCallback != nil {
-							p.logCallback(LogLevelInfo, fmt.Sprintf("Tag departed: %X", prevTag.ID))
-						}
-					default:
-						if p.logCallback != nil {
-							p.logCallback(LogLevelWarning, "Tag event channel full, dropping departure event")
-						}
+				default:
+					if p.logCallback != nil {
+						p.logCallback(LogLevelWarning, "Tag event channel full, dropping departure event")
 					}
 				}
 			}
-
-			previousTags = make([]Tag, len(currentTags))
-			copy(previousTags, currentTags)
 		}
+
+		// Update previous tags list (even if empty now)
+		previousTags = make([]Tag, len(currentTags))
+		copy(previousTags, currentTags)
 	}
 }
 
