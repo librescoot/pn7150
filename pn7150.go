@@ -623,6 +623,9 @@ func (p *PN7150) StopDiscovery() error {
 
 	p.mutex.Lock()
 	p.state = stateIdle
+	// Clear tag cache to prevent returning stale tags on next cycle
+	p.numTags = 0
+	p.tagSelected = false
 	p.mutex.Unlock()
 
 	if p.logCallback != nil {
