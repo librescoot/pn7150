@@ -472,6 +472,14 @@ func (p *PN7150) Deinitialize() {
 // StartDiscovery implements HAL.StartDiscovery
 func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 
+	p.mutex.Lock()
+	currentState := p.state
+	p.mutex.Unlock()
+
+	if currentState == stateUninitialized || currentState == stateInitializing {
+		return fmt.Errorf("cannot start discovery in state: %s", currentState)
+	}
+
 	if pollPeriod > maxTotalDuration {
 		if p.logCallback != nil {
 			p.logCallback(LogLevelError, fmt.Sprintf("start discovery: invalid poll_period: %d", pollPeriod))
@@ -494,6 +502,13 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 	if !isSuccessResponse(nciResp) && nciResp.Status != nciStatusSemanticError {
 		return NewNCIInvalidDataError(fmt.Sprintf("RF deactivate failed with status: %02x", nciResp.Status))
 	}
+
+	// Deactivation succeeded — update state to idle so error paths are consistent
+	p.mutex.Lock()
+	p.state = stateIdle
+	p.numTags = 0
+	p.tagSelected = false
+	p.mutex.Unlock()
 
 	// Wait for and consume RF_DEACTIVATE_NTF before proceeding
 	// The PN7150 sends this notification asynchronously after the deactivate response
