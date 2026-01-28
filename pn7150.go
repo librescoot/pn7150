@@ -1447,20 +1447,21 @@ func (p *PN7150) transferWithTimeout(tx []byte, timeout time.Duration) ([]byte, 
 			}
 
 			// Read payload with retry logic
+			var payloadReadErr error
 			for retry := 0; retry <= i2cMaxRetries; retry++ {
 				payloadN, err := unix.Read(p.fd, p.rxBuf[3:3+payloadLen])
 				if err == nil && payloadN == payloadLen {
-					// Success
+					payloadReadErr = nil
 					break
 				}
 
 				if err != nil {
 					if err == unix.ENXIO && retry < i2cMaxRetries {
-						// Address NACK, retry
 						time.Sleep(time.Duration(i2cRetryTimeUs) * time.Microsecond)
 						continue
 					}
-					return nil, NewI2CReadError("I2C read payload error", err)
+					payloadReadErr = NewI2CReadError("I2C read payload error", err)
+					break
 				}
 
 				if payloadN != payloadLen {
@@ -1468,8 +1469,13 @@ func (p *PN7150) transferWithTimeout(tx []byte, timeout time.Duration) ([]byte, 
 						time.Sleep(time.Duration(i2cRetryTimeUs) * time.Microsecond)
 						continue
 					}
-					return nil, NewNCIIncompleteReadError(fmt.Sprintf("incomplete payload read: %d != %d", payloadN, payloadLen))
+					payloadReadErr = NewNCIIncompleteReadError(fmt.Sprintf("incomplete payload read: %d != %d", payloadN, payloadLen))
+					break
 				}
+			}
+			if payloadReadErr != nil {
+				p.flushReadBuffer()
+				return nil, payloadReadErr
 			}
 		}
 
