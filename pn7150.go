@@ -70,6 +70,7 @@ type PN7150 struct {
 	tagEventChan          chan TagEvent
 	tagEventReaderStop    chan struct{}
 	tagEventReaderRunning bool
+	tagEventReaderDone    sync.WaitGroup
 }
 
 func NewPN7150(devName string, logCallback LogCallback, app interface{}, standbyEnabled, lpcdEnabled bool, debugMode bool) (*PN7150, error) {
@@ -445,7 +446,7 @@ func (p *PN7150) Deinitialize() {
 	if p.tagEventReaderRunning {
 		p.tagEventReaderRunning = false
 		close(p.tagEventReaderStop)
-		time.Sleep(50 * time.Millisecond)
+		p.tagEventReaderDone.Wait()
 		p.tagEventReaderStop = make(chan struct{})
 	}
 
@@ -796,7 +797,7 @@ func (p *PN7150) FullReinitialize() error {
 	if p.tagEventReaderRunning {
 		p.tagEventReaderRunning = false
 		close(p.tagEventReaderStop)
-		time.Sleep(50 * time.Millisecond)
+		p.tagEventReaderDone.Wait()
 		p.tagEventReaderStop = make(chan struct{})
 	}
 
@@ -819,7 +820,11 @@ func (p *PN7150) FullReinitialize() error {
 
 	// Restart tag event reader
 	p.tagEventReaderRunning = true
-	go p.tagEventReader()
+	p.tagEventReaderDone.Add(1)
+	go func() {
+		defer p.tagEventReaderDone.Done()
+		p.tagEventReader()
+	}()
 	if p.logCallback != nil {
 		p.logCallback(LogLevelInfo, "Tag event reader restarted after reinitialization")
 	}
@@ -1174,16 +1179,18 @@ func (p *PN7150) SetTagEventReaderEnabled(enabled bool) {
 
 	if enabled && !p.tagEventReaderRunning {
 		p.tagEventReaderRunning = true
-		go p.tagEventReader()
+		p.tagEventReaderDone.Add(1)
+		go func() {
+			defer p.tagEventReaderDone.Done()
+			p.tagEventReader()
+		}()
 		if p.logCallback != nil {
 			p.logCallback(LogLevelInfo, "Tag event reader started")
 		}
 	} else if !enabled && p.tagEventReaderRunning {
 		p.tagEventReaderRunning = false
 		close(p.tagEventReaderStop)
-		// Wait a bit for the goroutine to stop
-		time.Sleep(10 * time.Millisecond)
-		// Recreate the stop channel for next time
+		p.tagEventReaderDone.Wait()
 		p.tagEventReaderStop = make(chan struct{})
 		if p.logCallback != nil {
 			p.logCallback(LogLevelInfo, "Tag event reader stopped")
@@ -1649,7 +1656,11 @@ func (p *PN7150) tagEventReader() {
 				p.logCallback(LogLevelError, fmt.Sprintf("Tag event reader panicked: %v, restarting...", r))
 			}
 			if p.tagEventReaderRunning && p.state != stateUninitialized {
-				go p.tagEventReader()
+				p.tagEventReaderDone.Add(1)
+				go func() {
+					defer p.tagEventReaderDone.Done()
+					p.tagEventReader()
+				}()
 			}
 		}
 	}()
