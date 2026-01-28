@@ -637,6 +637,8 @@ func (p *PN7150) StopDiscovery() error {
 }
 
 func (p *PN7150) GetState() State {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
 	return State(p.state)
 }
 
@@ -644,18 +646,20 @@ func (p *PN7150) GetState() State {
 func (p *PN7150) DetectTags() ([]Tag, error) {
 	resp, err := p.transfer(nil)
 	if err != nil {
-		// Return I2C error as-is to preserve type for HAL recovery
 		return nil, err
 	}
 
+	// Hold mutex for all state access after transfer
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
 	if len(resp) == 0 {
 		if p.state == statePresent && p.numTags > 0 {
-			return p.tags[:p.numTags], nil
+			return p.copyTags(), nil
 		}
 		return nil, nil
 	}
 
-	// Parse NCI header
 	if len(resp) < 3 {
 		return nil, fmt.Errorf("incomplete NCI header")
 	}
@@ -664,20 +668,19 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 	gid := resp[0] & 0x0F
 	oid := resp[1] & 0x3F
 
-	// Handle status notifications
 	if mt == nciMsgTypeNotification && gid == nciGroupStatus {
 		if p.logCallback != nil {
 			p.logCallback(LogLevelDebug, fmt.Sprintf("Status notification received: %02x %02x", oid, resp[2]))
 		}
 		if p.state == statePresent && p.numTags > 0 {
-			return p.tags[:p.numTags], nil
+			return p.copyTags(), nil
 		}
 		return nil, nil
 	}
 
 	if mt != nciMsgTypeNotification || gid != nciGroupRF {
 		if p.state == statePresent && p.numTags > 0 {
-			return p.tags[:p.numTags], nil
+			return p.copyTags(), nil
 		}
 		return nil, nil
 	}
@@ -698,12 +701,10 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 			return nil, nil
 		}
 
-		// Store tag information
 		if p.numTags < maxTags {
 			tag := Tag{
 				RFProtocol: RFProtocol(rfProtocol),
 			}
-			// Extract UID if present
 			if len(resp) >= 10 && resp[9] <= maxUIDSize {
 				tag.ID = make([]byte, resp[9])
 				copy(tag.ID, resp[10:10+resp[9]])
@@ -711,41 +712,34 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 			p.tags[p.numTags] = tag
 			p.numTags++
 
-			// Extra log info after reinitialization
 			if p.logCallback != nil {
 				p.logCallback(LogLevelDebug, fmt.Sprintf("Tag discovered: protocol=%s, uid_len=%d, uid=%X", tag.RFProtocol, len(tag.ID), tag.ID))
 			}
 		}
 
-		// Check if this is the last tag
 		if resp[len(resp)-1] == 0x02 {
-			// Not the last tag, keep waiting for more
 			return nil, nil
 		}
 
-		// Reject multiple tags
 		if p.numTags > 1 {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelError, fmt.Sprintf("Multiple tags detected: %d (not supported)", p.numTags))
 			}
-			// Clear tag state and return to discovering
 			p.numTags = 0
 			p.state = stateDiscovering
 			p.tagSelected = false
 			return nil, NewMultipleTagsError("multiple tags not supported")
 		}
 
-		// Tag is now present and selected
 		p.state = statePresent
 		p.tagSelected = true
-		return p.tags[:p.numTags], nil
+		return p.copyTags(), nil
 
 	case nciRFIntfActivatedOID:
 		tag, err := parseRFIntfActivatedNtf(resp)
 		if err != nil {
 			return nil, err
 		}
-		// Update state and store tag
 		p.state = statePresent
 		p.numTags = 1
 		p.tags[0] = *tag
@@ -757,15 +751,12 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 		if p.logCallback != nil {
 			p.logCallback(LogLevelDebug, "RF_DEACTIVATE_NTF received")
 		}
-		// When a deactivation notification is received, it means no tag is currently active.
-		// Always clear current tag information and transition to discovering state.
 		p.numTags = 0
 		p.state = stateDiscovering
 		p.tagSelected = false
 	}
 
 	if p.state == statePresent && p.numTags > 0 {
-		// Additional check for multi-tag scenarios
 		if p.numTags > 1 {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelError, fmt.Sprintf("Multiple tags present: %d (not supported)", p.numTags))
@@ -775,9 +766,17 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 			p.tagSelected = false
 			return nil, NewMultipleTagsError("multiple tags not supported")
 		}
-		return p.tags[:p.numTags], nil
+		return p.copyTags(), nil
 	}
 	return nil, nil
+}
+
+// copyTags returns a copy of the current tags slice.
+// Caller must hold p.mutex.
+func (p *PN7150) copyTags() []Tag {
+	result := make([]Tag, p.numTags)
+	copy(result, p.tags[:p.numTags])
+	return result
 }
 
 // FullReinitialize completely reinitializes the PN7150 HAL from scratch
