@@ -461,6 +461,7 @@ func (p *PN7150) Deinitialize() {
 	p.state = stateUninitialized
 	p.numTags = 0
 	p.tagSelected = false
+	p.transitionTableSent = false
 	p.mutex.Unlock()
 
 	if p.logCallback != nil {
@@ -811,6 +812,7 @@ func (p *PN7150) FullReinitialize() error {
 	p.state = stateUninitialized
 	p.numTags = 0
 	p.tagSelected = false
+	p.transitionTableSent = false
 
 	// Power on and reinitialize
 	if err := p.Initialize(); err != nil {
