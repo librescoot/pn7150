@@ -469,6 +469,22 @@ func (p *PN7150) Deinitialize() {
 	}
 }
 
+// Close releases all resources including the file descriptor.
+// Deinitialize() keeps the FD open for reinitialization; call Close()
+// when the device is no longer needed.
+func (p *PN7150) Close() {
+	p.Deinitialize()
+
+	p.mutex.Lock()
+	fd := p.fd
+	p.fd = -1
+	p.mutex.Unlock()
+
+	if fd >= 0 {
+		unix.Close(fd)
+	}
+}
+
 // StartDiscovery implements HAL.StartDiscovery
 func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 
