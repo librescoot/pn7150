@@ -1800,12 +1800,16 @@ func tagsEqual(a, b *Tag) bool {
 // AwaitReadable implements HAL.AwaitReadable
 // Waits for the NFC device FD to become readable with given timeout
 func (p *PN7150) AwaitReadable(timeout time.Duration) error {
-	if p.fd < 0 {
+	p.mutex.Lock()
+	fd := p.fd
+	p.mutex.Unlock()
+
+	if fd < 0 {
 		return fmt.Errorf("invalid file descriptor")
 	}
 
 	pfd := unix.PollFd{
-		Fd:     int32(p.fd),
+		Fd:     int32(fd),
 		Events: unix.POLLIN,
 	}
 
