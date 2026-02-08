@@ -661,20 +661,6 @@ func (p *PN7150) StopDiscovery() error {
 	p.tagSelected = false
 	p.mutex.Unlock()
 
-	// Consume RF_DEACTIVATE_NTF if present (sent asynchronously after deactivation)
-	if err := p.AwaitReadable(1 * time.Second); err == nil {
-		ntfResp, ntfErr := p.transfer(nil)
-		if ntfErr == nil && len(ntfResp) >= 2 {
-			mt := (ntfResp[0] >> nciMsgTypeBit) & 0x03
-			oid := ntfResp[1] & 0x3F
-			if mt == nciMsgTypeNotification && oid == nciRFDeactivateOID {
-				if p.logCallback != nil {
-					p.logCallback(LogLevelDebug, "RF_DEACTIVATE_NTF received and consumed")
-				}
-			}
-		}
-	}
-
 	if p.logCallback != nil {
 		p.logCallback(LogLevelInfo, "Stopped discovery")
 	}
