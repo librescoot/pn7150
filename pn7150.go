@@ -505,7 +505,6 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 
 	resp, err := p.transfer(buildRFDeactivateCmd())
 	if err != nil {
-		// Return I2C error as-is to preserve type for HAL recovery
 		return err
 	}
 
@@ -529,7 +528,6 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 	// Wait for and consume RF_DEACTIVATE_NTF before proceeding
 	// The PN7150 sends this notification asynchronously after the deactivate response
 	if err := p.AwaitReadable(1 * time.Second); err == nil {
-		// Read the notification to clear it
 		ntfResp, ntfErr := p.transfer(nil)
 		if ntfErr == nil && len(ntfResp) >= 2 {
 			mt := (ntfResp[0] >> nciMsgTypeBit) & 0x03
@@ -602,7 +600,6 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 	discoverCmd := buildRFDiscoverCmd()
 	resp, err = p.transfer(discoverCmd)
 	if err != nil {
-		// Return I2C error as-is to preserve type for HAL recovery
 		return err
 	}
 
@@ -764,7 +761,7 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 		}
 
 		p.state = statePresent
-		p.tagSelected = true
+		p.tagSelected = false // discovered but not yet in RF_ACTIVATED state; caller must SelectTag
 		return p.copyTags(), nil
 
 	case nciRFIntfActivatedOID:
@@ -1141,7 +1138,6 @@ func (p *PN7150) SelectTag(tagIdx uint) error {
 		}
 		_, err := p.transfer(cmd)
 		if err != nil {
-			// Return I2C error as-is to preserve type for HAL recovery
 			return err
 		}
 
@@ -1172,7 +1168,6 @@ func (p *PN7150) SelectTag(tagIdx uint) error {
 
 	resp, err := p.transfer(cmd)
 	if err != nil {
-		// Return I2C error as-is to preserve type for HAL recovery
 		return err
 	}
 
@@ -1192,7 +1187,7 @@ func (p *PN7150) SelectTag(tagIdx uint) error {
 	}
 
 	p.tagSelected = true
-	p.state = statePresent // Update state since awaitNotification consumed RF_INTF_ACTIVATED
+	p.state = statePresent
 	return nil
 }
 
@@ -1253,30 +1248,22 @@ func (p *PN7150) handleCreditNotification() ([]byte, error) {
 
 // awaitNotification waits for a specific notification message with timeout tracking
 func (p *PN7150) awaitNotification(msgID uint16, timeoutMs uint) error {
-	startTime := time.Now()
-	remainingTimeout := time.Duration(timeoutMs) * time.Millisecond
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 
 	for {
-		// Check if we've exceeded the timeout
-		elapsed := time.Since(startTime)
-		if elapsed >= remainingTimeout {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelWarning, "await notification timeout")
 			}
-			// Timeout waiting for notification likely means tag departed
 			return NewTagDepartedError(fmt.Sprintf("timeout waiting for notification 0x%04X", msgID))
 		}
 
-		// Calculate remaining timeout
-		remainingTimeout = time.Duration(timeoutMs)*time.Millisecond - elapsed
-
-		// Try to read a packet with the remaining timeout
-		resp, err := p.transferWithTimeout(nil, remainingTimeout)
+		resp, err := p.transferWithTimeout(nil, remaining)
 		if err != nil {
 			return err
 		}
 
-		// Check if this is the notification we're waiting for
 		if len(resp) >= 3 {
 			mt := (resp[0] >> nciMsgTypeBit) & 0x03
 			if mt == nciMsgTypeNotification {
@@ -1284,13 +1271,10 @@ func (p *PN7150) awaitNotification(msgID uint16, timeoutMs uint) error {
 				oid := resp[1] & 0x3F
 				gotMsgID := uint16(gid)<<8 | uint16(oid)
 				if gotMsgID == msgID {
-					return nil // Found the notification
+					return nil
 				}
 			}
 		}
-
-		// Update elapsed time for next iteration
-		startTime = time.Now()
 	}
 }
 
@@ -1305,7 +1289,7 @@ func (p *PN7150) transferWithTimeout(tx []byte, timeout time.Duration) ([]byte, 
 		for i := 0; i <= i2cMaxRetries; i++ {
 			n, err := unix.Write(p.fd, tx)
 			if err == nil && n == len(tx) {
-				// Success
+				writeErr = nil
 				break
 			}
 
@@ -1719,12 +1703,21 @@ func (p *PN7150) tagEventReader() {
 		default:
 		}
 
+		p.mutex.Lock()
+		inPresent := p.state == statePresent && p.numTags > 0
+		p.mutex.Unlock()
+
+		pollTimeoutMs := 5000
+		if inPresent {
+			pollTimeoutMs = 200
+		}
+
 		pfd := unix.PollFd{
 			Fd:     int32(p.fd),
 			Events: unix.POLLIN,
 		}
 
-		_, err := unix.Poll([]unix.PollFd{pfd}, 5000)
+		n, err := unix.Poll([]unix.PollFd{pfd}, pollTimeoutMs)
 		if err != nil {
 			if err == unix.EINTR {
 				continue
@@ -1736,12 +1729,45 @@ func (p *PN7150) tagEventReader() {
 			continue
 		}
 
-		// Call DetectTags on every cycle (both readable and timeout)
-		// The PN7150 sends notifications that must be processed to keep the FD clear
-		// and to detect tag arrivals/departures during any state
-
-		currentTags, err := p.DetectTags()
-		if err != nil {
+		var currentTags []Tag
+		if n == 0 && inPresent {
+			// Poll timed out while a card is selected — probe whether it is still present.
+			// The probe restarts discovery and waits for re-detection of the same card.
+			// It leaves the chip in discovery mode on return (both true and false).
+			if p.probeCardPresent() {
+				// Card confirmed present; keep previousTags unchanged, no events.
+				continue
+			}
+			// Card gone — probe already restarted discovery.
+			// currentTags remains nil → departure event fires in the comparison below.
+		} else if n > 0 {
+			var detErr error
+			currentTags, detErr = p.DetectTags()
+			if detErr != nil {
+				continue
+			}
+			// If the tag came from RF_DISCOVER_NTF (tagSelected=false), it is not yet
+			// in RF_ACTIVATED state. We must send RF_DISCOVER_SELECT to activate it;
+			// this is required for the SLEEP probe in probeCardPresent() to work.
+			if len(currentTags) > 0 {
+				p.mutex.Lock()
+				needsSelect := !p.tagSelected
+				p.mutex.Unlock()
+				if needsSelect {
+					if p.logCallback != nil {
+						p.logCallback(LogLevelDebug, "tagEventReader: selecting tag after RF_DISCOVER_NTF")
+					}
+					if selErr := p.SelectTag(0); selErr != nil {
+						if p.logCallback != nil {
+							p.logCallback(LogLevelDebug, fmt.Sprintf("tagEventReader: SelectTag failed: %v", selErr))
+						}
+						// Card left before we could select it; treat as no tags present.
+						currentTags = nil
+					}
+				}
+			}
+		} else {
+			// Poll timed out while not in statePresent — nothing to do.
 			continue
 		}
 
@@ -1863,4 +1889,81 @@ func (p *PN7150) AwaitReadable(timeout time.Duration) error {
 	}
 
 	return nil
+}
+
+// probeCardPresent checks whether the currently detected card is still physically
+// present by restarting discovery and waiting for the card to be re-detected.
+// Returns true if the same card UID is re-detected (still present) or false if not (gone).
+// Always leaves the chip in discovery mode on return.
+// Must only be called from tagEventReader when in statePresent.
+func (p *PN7150) probeCardPresent() bool {
+	p.mutex.Lock()
+	if p.numTags == 0 {
+		p.mutex.Unlock()
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, "probe: skipped (no tags)")
+		}
+		return false
+	}
+	prevUID := make([]byte, len(p.tags[0].ID))
+	copy(prevUID, p.tags[0].ID)
+	p.mutex.Unlock()
+
+	if p.logCallback != nil {
+		p.logCallback(LogLevelInfo, fmt.Sprintf("probe: restarting discovery to verify card %X", prevUID))
+	}
+
+	// Deactivate current tag and restart discovery. StartDiscovery handles all
+	// NCI state transitions and consumes any pending RF_DEACTIVATE_NTF.
+	if err := p.StartDiscovery(100); err != nil {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, fmt.Sprintf("probe: StartDiscovery failed: %v", err))
+		}
+		return false
+	}
+
+	// Wait up to 300ms for RF_DISCOVER_NTF (poll period is 100ms, so 3x headroom).
+	pfd := unix.PollFd{
+		Fd:     int32(p.fd),
+		Events: unix.POLLIN,
+	}
+	n, err := unix.Poll([]unix.PollFd{pfd}, 300)
+	if err != nil || n == 0 {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, "probe: no card re-detected within 300ms (departed)")
+		}
+		return false
+	}
+
+	// Read the discovery notification.
+	tags, detErr := p.DetectTags()
+	if detErr != nil || len(tags) == 0 {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, fmt.Sprintf("probe: DetectTags returned no tags (departed): %v", detErr))
+		}
+		return false
+	}
+
+	// Verify it is the same card.
+	if !bytes.Equal(tags[0].ID, prevUID) {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, fmt.Sprintf("probe: different card detected (was %X, got %X)", prevUID, tags[0].ID))
+		}
+		return false
+	}
+
+	// Re-select the card to put it back in RF_ACTIVATED state for the next probe.
+	if selErr := p.SelectTag(0); selErr != nil {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, fmt.Sprintf("probe: SelectTag failed: %v", selErr))
+		}
+		// Chip state is indeterminate after failed SelectTag; restart discovery.
+		_ = p.StartDiscovery(100)
+		return false
+	}
+
+	if p.logCallback != nil {
+		p.logCallback(LogLevelDebug, fmt.Sprintf("probe: card %X confirmed present", prevUID))
+	}
+	return true
 }
