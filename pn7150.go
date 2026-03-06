@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -23,7 +24,7 @@ const (
 	maxTotalDuration  = 2750 // ms
 )
 
-type state int
+type state int32
 
 const (
 	stateUninitialized state = iota
@@ -32,6 +33,14 @@ const (
 	stateDiscovering
 	statePresent
 )
+
+func (p *PN7150) loadState() state {
+	return state(p.atomicState.Load())
+}
+
+func (p *PN7150) storeState(s state) {
+	p.atomicState.Store(int32(s))
+}
 
 func (s state) String() string {
 	switch s {
@@ -52,7 +61,7 @@ func (s state) String() string {
 
 type PN7150 struct {
 	mutex               sync.Mutex
-	state               state
+	atomicState         atomic.Int32
 	fd                  int
 	devicePath          string
 	logCallback         LogCallback
@@ -108,14 +117,9 @@ func (p *PN7150) logNCI(buf []byte, size int, direction string) {
 }
 
 func (p *PN7150) Initialize() error {
-	p.mutex.Lock()
-	if p.state != stateUninitialized {
-		currentState := p.state
-		p.mutex.Unlock()
-		return fmt.Errorf("invalid state for initialization: %s", currentState)
+	if !p.atomicState.CompareAndSwap(int32(stateUninitialized), int32(stateInitializing)) {
+		return fmt.Errorf("invalid state for initialization: %s", p.loadState())
 	}
-	p.state = stateInitializing
-	p.mutex.Unlock()
 
 	if p.logCallback != nil {
 		p.logCallback(LogLevelInfo, "Initializing PN7150")
@@ -401,9 +405,7 @@ func (p *PN7150) Initialize() error {
 		return NewNCIInvalidDataError(fmt.Sprintf("RF discover map failed with status: %02x", nciResp.Status))
 	}
 
-	p.mutex.Lock()
-	p.state = stateIdle
-	p.mutex.Unlock()
+	p.storeState(stateIdle)
 
 	return nil
 }
@@ -458,7 +460,7 @@ func (p *PN7150) Deinitialize() {
 	}
 
 	p.mutex.Lock()
-	p.state = stateUninitialized
+	p.storeState(stateUninitialized)
 	p.numTags = 0
 	p.tagSelected = false
 	p.transitionTableSent = false
@@ -488,9 +490,7 @@ func (p *PN7150) Close() {
 // StartDiscovery implements HAL.StartDiscovery
 func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 
-	p.mutex.Lock()
-	currentState := p.state
-	p.mutex.Unlock()
+	currentState := p.loadState()
 
 	if currentState == stateUninitialized || currentState == stateInitializing {
 		return fmt.Errorf("cannot start discovery in state: %s", currentState)
@@ -520,7 +520,7 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 
 	// Deactivation succeeded — update state to idle so error paths are consistent
 	p.mutex.Lock()
-	p.state = stateIdle
+	p.storeState(stateIdle)
 	p.numTags = 0
 	p.tagSelected = false
 	p.mutex.Unlock()
@@ -613,7 +613,7 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 	}
 
 	p.mutex.Lock()
-	p.state = stateDiscovering
+	p.storeState(stateDiscovering)
 	p.numTags = 0
 	p.tagSelected = false
 	p.mutex.Unlock()
@@ -628,9 +628,7 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 // StopDiscovery implements HAL.StopDiscovery
 func (p *PN7150) StopDiscovery() error {
 
-	p.mutex.Lock()
-	currentState := p.state
-	p.mutex.Unlock()
+	currentState := p.loadState()
 
 	if currentState != stateDiscovering && currentState != statePresent {
 		return NewNCIInvalidDataError(fmt.Sprintf("invalid state for stopping discovery: %s", currentState))
@@ -652,7 +650,7 @@ func (p *PN7150) StopDiscovery() error {
 	}
 
 	p.mutex.Lock()
-	p.state = stateIdle
+	p.storeState(stateIdle)
 	// Clear tag cache to prevent returning stale tags on next cycle
 	p.numTags = 0
 	p.tagSelected = false
@@ -666,9 +664,7 @@ func (p *PN7150) StopDiscovery() error {
 }
 
 func (p *PN7150) GetState() State {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	return State(p.state)
+	return State(p.loadState())
 }
 
 // DetectTags implements HAL.DetectTags
@@ -683,7 +679,7 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 	defer p.mutex.Unlock()
 
 	if len(resp) == 0 {
-		if p.state == statePresent && p.numTags > 0 {
+		if p.loadState() == statePresent && p.numTags > 0 {
 			return p.copyTags(), nil
 		}
 		return nil, nil
@@ -701,14 +697,14 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 		if p.logCallback != nil {
 			p.logCallback(LogLevelDebug, fmt.Sprintf("Status notification received: %02x %02x", oid, resp[2]))
 		}
-		if p.state == statePresent && p.numTags > 0 {
+		if p.loadState() == statePresent && p.numTags > 0 {
 			return p.copyTags(), nil
 		}
 		return nil, nil
 	}
 
 	if mt != nciMsgTypeNotification || gid != nciGroupRF {
-		if p.state == statePresent && p.numTags > 0 {
+		if p.loadState() == statePresent && p.numTags > 0 {
 			return p.copyTags(), nil
 		}
 		return nil, nil
@@ -755,12 +751,12 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 				p.logCallback(LogLevelError, fmt.Sprintf("Multiple tags detected: %d (not supported)", p.numTags))
 			}
 			p.numTags = 0
-			p.state = stateDiscovering
+			p.storeState(stateDiscovering)
 			p.tagSelected = false
 			return nil, NewMultipleTagsError("multiple tags not supported")
 		}
 
-		p.state = statePresent
+		p.storeState(statePresent)
 		p.tagSelected = false // discovered but not yet in RF_ACTIVATED state; caller must SelectTag
 		return p.copyTags(), nil
 
@@ -769,7 +765,7 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 		if err != nil {
 			return nil, err
 		}
-		p.state = statePresent
+		p.storeState(statePresent)
 		p.numTags = 1
 		p.tags[0] = *tag
 		p.tagSelected = true
@@ -781,17 +777,17 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 			p.logCallback(LogLevelDebug, "RF_DEACTIVATE_NTF received")
 		}
 		p.numTags = 0
-		p.state = stateDiscovering
+		p.storeState(stateDiscovering)
 		p.tagSelected = false
 	}
 
-	if p.state == statePresent && p.numTags > 0 {
+	if p.loadState() == statePresent && p.numTags > 0 {
 		if p.numTags > 1 {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelError, fmt.Sprintf("Multiple tags present: %d (not supported)", p.numTags))
 			}
 			p.numTags = 0
-			p.state = stateDiscovering
+			p.storeState(stateDiscovering)
 			p.tagSelected = false
 			return nil, NewMultipleTagsError("multiple tags not supported")
 		}
@@ -813,7 +809,7 @@ func (p *PN7150) copyTags() []Tag {
 // simple discovery restarts don't resolve the issue
 // Caller must NOT hold the lock when calling this
 func (p *PN7150) FullReinitialize() error {
-	if p.state == stateInitializing {
+	if p.loadState() == stateInitializing {
 		return nil
 	}
 
@@ -837,7 +833,7 @@ func (p *PN7150) FullReinitialize() error {
 	}
 
 	// Reset internal state (but keep FD open)
-	p.state = stateUninitialized
+	p.storeState(stateUninitialized)
 	p.numTags = 0
 	p.tagSelected = false
 	p.transitionTableSent = false
@@ -868,11 +864,10 @@ func (p *PN7150) FullReinitialize() error {
 // ReadBinary implements HAL.ReadBinary
 func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 
-	if p.state != statePresent {
-		return nil, NewNCIInvalidDataError(fmt.Sprintf("invalid state for reading: %s", p.state))
-	}
-
-	if p.state == stateDiscovering {
+	// If stuck in Discovering, stop discovery so the chip is in a clean state
+	// for the caller's subsequent reinit. The read itself will still fail
+	// (state becomes Idle, not Present) but reinit starts from a sane baseline.
+	if p.loadState() == stateDiscovering {
 		if p.logCallback != nil {
 			p.logCallback(LogLevelDebug, "Stopping discovery before read operation")
 		}
@@ -880,9 +875,13 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 		if err == nil {
 			nciResp, _ := parseNCIResponse(resp)
 			if nciResp != nil && (isSuccessResponse(nciResp) || nciResp.Status == nciStatusSemanticError) {
-				p.state = stateIdle
+				p.storeState(stateIdle)
 			}
 		}
+	}
+
+	if currentState := p.loadState(); currentState != statePresent {
+		return nil, NewNCIInvalidDataError(fmt.Sprintf("invalid state for reading: %s", currentState))
 	}
 
 	// Check if we have a tag and what protocol it is
@@ -993,11 +992,7 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 // WriteBinary implements HAL.WriteBinary
 func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 
-	if p.state != statePresent {
-		return NewNCIInvalidDataError(fmt.Sprintf("invalid state for writing: %s", p.state))
-	}
-
-	if p.state == stateDiscovering {
+	if p.loadState() == stateDiscovering {
 		if p.logCallback != nil {
 			p.logCallback(LogLevelDebug, "Stopping discovery before write operation")
 		}
@@ -1005,9 +1000,13 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 		if err == nil {
 			nciResp, _ := parseNCIResponse(resp)
 			if nciResp != nil && (isSuccessResponse(nciResp) || nciResp.Status == nciStatusSemanticError) {
-				p.state = stateIdle
+				p.storeState(stateIdle)
 			}
 		}
+	}
+
+	if currentState := p.loadState(); currentState != statePresent {
+		return NewNCIInvalidDataError(fmt.Sprintf("invalid state for writing: %s", currentState))
 	}
 
 	// Check if we have a tag and what protocol it is
@@ -1187,7 +1186,7 @@ func (p *PN7150) SelectTag(tagIdx uint) error {
 	}
 
 	p.tagSelected = true
-	p.state = statePresent
+	p.storeState(statePresent)
 	return nil
 }
 
@@ -1677,7 +1676,7 @@ func (p *PN7150) tagEventReader() {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelError, fmt.Sprintf("Tag event reader panicked: %v, restarting...", r))
 			}
-			if p.tagEventReaderRunning && p.state != stateUninitialized {
+			if p.tagEventReaderRunning && p.loadState() != stateUninitialized {
 				p.tagEventReaderDone.Add(1)
 				go func() {
 					defer p.tagEventReaderDone.Done()
@@ -1704,7 +1703,7 @@ func (p *PN7150) tagEventReader() {
 		}
 
 		p.mutex.Lock()
-		inPresent := p.state == statePresent && p.numTags > 0
+		inPresent := p.loadState() == statePresent && p.numTags > 0
 		p.mutex.Unlock()
 
 		pollTimeoutMs := 5000
