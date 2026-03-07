@@ -657,7 +657,7 @@ func (p *PN7150) StopDiscovery() error {
 	p.mutex.Unlock()
 
 	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "Stopped discovery")
+		p.logCallback(LogLevelDebug, "Stopped discovery")
 	}
 
 	return nil
