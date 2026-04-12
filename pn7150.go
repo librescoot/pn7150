@@ -674,6 +674,32 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 		return nil, err
 	}
 
+	// Before acquiring the mutex, check if this is a single-tag RF_DISCOVER_NTF
+	// (last notification). The PN7150 auto-activates single tags and sends
+	// RF_INTF_ACTIVATED_NTF immediately after — read it now so the tag is
+	// properly activated and no stale notification is left pending.
+	var activateResp []byte
+	if len(resp) >= 7 {
+		mt0 := (resp[0] >> nciMsgTypeBit) & 0x03
+		gid0 := resp[0] & 0x0F
+		oid0 := resp[1] & 0x3F
+		if mt0 == nciMsgTypeNotification && gid0 == nciGroupRF && oid0 == nciRFDiscoverOID &&
+			resp[len(resp)-1] != 0x02 { // last notification
+			// resp points into rxBuf which the next transfer overwrites,
+			// so save the discovery data first.
+			savedResp := make([]byte, len(resp))
+			copy(savedResp, resp)
+			resp = savedResp
+
+			activateResp, _ = p.transferWithTimeout(nil, readTimeout)
+			if len(activateResp) > 0 {
+				savedActivate := make([]byte, len(activateResp))
+				copy(savedActivate, activateResp)
+				activateResp = savedActivate
+			}
+		}
+	}
+
 	// Hold mutex for all state access after transfer
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
@@ -756,8 +782,29 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 			return nil, NewMultipleTagsError("multiple tags not supported")
 		}
 
+		// Single tag discovered. Check if we got the auto-activation notification.
+		if len(activateResp) >= 3 {
+			activateMT := (activateResp[0] >> nciMsgTypeBit) & 0x03
+			activateGID := activateResp[0] & 0x0F
+			activateOID := activateResp[1] & 0x3F
+			if activateMT == nciMsgTypeNotification && activateGID == nciGroupRF && activateOID == nciRFIntfActivatedOID {
+				tag, err := parseRFIntfActivatedNtf(activateResp)
+				if err == nil {
+					p.storeState(statePresent)
+					p.numTags = 1
+					p.tags[0] = *tag
+					p.tagSelected = true
+					if p.logCallback != nil {
+						p.logCallback(LogLevelDebug, fmt.Sprintf("Tag auto-activated after discovery: %X", tag.ID))
+					}
+					return []Tag{*tag}, nil
+				}
+			}
+		}
+
+		// Auto-activation not received — tag discovered but not activated
 		p.storeState(statePresent)
-		p.tagSelected = false // discovered but not yet in RF_ACTIVATED state; caller must SelectTag
+		p.tagSelected = false
 		return p.copyTags(), nil
 
 	case nciRFIntfActivatedOID:
@@ -1509,10 +1556,20 @@ func (p *PN7150) transferWithTimeout(tx []byte, timeout time.Duration) ([]byte, 
 			}
 		}
 
-		// Special case: If we sent a data packet (MT=0), expect a notification as response
-		// Make sure tx is not nil and has at least 1 element before accessing tx[0]
+		// When we sent a DATA packet (MT=0), only return credit notifications.
+		// Other notifications (e.g. stale RF_INTF_ACTIVATED_NTF from auto-activation
+		// after discovery) must be skipped — returning them as a DATA response causes
+		// the caller to parse notification bytes as register data (garbage reads).
 		if len(tx) > 0 && mt == nciMsgTypeNotification && (tx[0]&0xE0) == 0 {
-			return p.rxBuf[:totalLen], nil
+			gid := p.rxBuf[0] & 0x0F
+			oid := p.rxBuf[1] & 0x3F
+			if gid == nciGroupCore && oid == nciCoreConnCredits {
+				return p.rxBuf[:totalLen], nil
+			}
+			if p.logCallback != nil {
+				p.logCallback(LogLevelDebug, fmt.Sprintf("Skipping stale notification during data exchange: GID=%02x OID=%02x", gid, oid))
+			}
+			continue
 		}
 
 		// For command responses
