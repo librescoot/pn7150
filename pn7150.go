@@ -1253,7 +1253,7 @@ func (p *PN7150) awaitNotification(msgID uint16, timeoutMs uint) error {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			if p.logCallback != nil {
-				p.logCallback(LogLevelWarning, "await notification timeout")
+				p.logCallback(LogLevelDebug, "await notification timeout")
 			}
 			return NewTagDepartedError(fmt.Sprintf("timeout waiting for notification 0x%04X", msgID))
 		}
