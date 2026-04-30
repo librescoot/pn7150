@@ -2,6 +2,8 @@
 
 Go implementation of a Hardware Abstraction Layer (HAL) for the NXP PN7150 NFC controller.
 
+Part of the [Librescoot](https://librescoot.org/) open-source platform.
+
 ## Overview
 
 This library provides a complete NCI (NFC Controller Interface) implementation for the PN7150 NFC reader IC, supporting:
@@ -111,9 +113,14 @@ The PN7150 is configured with:
 
 ## License
 
-This project is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License (CC-BY-NC-4.0).
+This project is dual-licensed. The source code is available under the
+[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License][cc-by-nc-sa].
+The maintainers reserve the right to grant separate licenses for commercial distribution; please contact the maintainers to discuss commercial licensing.
 
-See [LICENSE](LICENSE) for details.
+[![CC BY-NC-SA 4.0][cc-by-nc-sa-image]][cc-by-nc-sa]
+
+[cc-by-nc-sa]: http://creativecommons.org/licenses/by-nc-sa/4.0/
+[cc-by-nc-sa-image]: https://licensebuttons.net/l/by-nc-sa/4.0/88x31.png
 
 ## Contributing
 
