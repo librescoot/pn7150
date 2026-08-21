@@ -987,8 +987,13 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 
 	// Process response - no retry loop, return errors immediately
 	for {
+		// For DATA packets, first 3 bytes are NCI header
+		if len(resp) < 3 {
+			return nil, fmt.Errorf("response too short")
+		}
+
 		// Check for CORE_CONN_CREDITS_NTF
-		if len(resp) >= 3 && resp[0] == 0x60 && resp[1] == 0x06 {
+		if resp[0] == 0x60 && resp[1] == 0x06 {
 			resp, err = p.handleCreditNotification()
 			if err != nil {
 				return nil, err
@@ -996,43 +1001,78 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 			continue
 		}
 
-		// Check for special response codes - NTAG arbiter busy
-		if len(resp) >= 5 && resp[3] == 0x03 {
-			// 0x03 = NTAG arbiter busy (locked to I2C interface)
-			if p.logCallback != nil {
-				p.logCallback(LogLevelDebug, "NTAG arbiter busy in read")
-			}
-			return nil, NewArbiterBusyError("NTAG arbiter busy")
-		}
-
-		// For DATA packets, first 3 bytes are NCI header
-		if len(resp) < 3 {
-			return nil, fmt.Errorf("response too short")
-		}
-
 		mt := (resp[0] >> nciMsgTypeBit) & 0x03
 
-		// Check for arbiter busy in message type field as well
-		if mt == 0x03 {
-			if p.logCallback != nil {
-				p.logCallback(LogLevelDebug, "NTAG arbiter busy in read (message type)")
+		if mt == nciMsgTypeNotification {
+			// Anything other than the credits notification handled above means
+			// the exchange did not complete. A deactivate notification is the
+			// tag leaving the field, which the caller must not retry.
+			gid := resp[0] & 0x0F
+			oid := resp[1] & 0x3F
+			if gid == nciGroupRF && oid == nciRFDeactivateOID {
+				return nil, NewTagDepartedError("RF deactivated during read")
 			}
-			return nil, NewArbiterBusyError("NTAG arbiter busy")
+			return nil, NewNCIInvalidDataError(
+				fmt.Sprintf("unexpected notification during read: gid=%02x oid=%02x", gid, oid))
 		}
 
 		if mt != nciMsgTypeData {
 			return nil, fmt.Errorf("unexpected response type: %02x", mt)
 		}
 
-		// Success - return the payload
 		if p.debug {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelDebug, fmt.Sprintf("DATA_RX: %X", resp[3:]))
 			}
 		}
-		result := make([]byte, len(resp)-3)
-		copy(result, resp[3:])
+
+		payload := resp[3:]
+
+		if protocol != RFProtocolT2T {
+			result := make([]byte, len(payload))
+			copy(result, payload)
+			return result, nil
+		}
+
+		result, err := parseT2TReadPayload(payload)
+		if err != nil {
+			if IsArbiterBusyError(err) && p.logCallback != nil {
+				p.logCallback(LogLevelDebug, "NTAG arbiter busy in read")
+			}
+			return nil, err
+		}
 		return result, nil
+	}
+}
+
+// parseT2TReadPayload turns the DATA payload of a Type 2 Tag READ into the 16
+// bytes the tag returned.
+//
+// A READ the tag answers carries 16 data bytes plus a trailing status byte; an
+// ACK or a NAK is a single byte plus the same trailing status. The length is
+// therefore what separates a refusal from data. Testing payload[0] on its own
+// treats the first data byte as a result code, which for a battery STATUS0 read
+// is the pack voltage low byte, so every frame whose voltage ended in 0x03 was
+// discarded as an arbiter NAK.
+func parseT2TReadPayload(payload []byte) ([]byte, error) {
+	switch len(payload) {
+	case t2tResultLen + 1:
+		if payload[0] == t2tNakArbiter {
+			return nil, NewArbiterBusyError("NTAG arbiter busy")
+		}
+		return nil, NewNCIInvalidDataError(fmt.Sprintf("tag refused read: %02x", payload[0]))
+
+	case t2tReadDataLen + 1:
+		if status := payload[t2tReadDataLen]; status != nciStatusOK {
+			return nil, NewNCIInvalidDataError(fmt.Sprintf("read failed with status %02x", status))
+		}
+		result := make([]byte, t2tReadDataLen)
+		copy(result, payload[:t2tReadDataLen])
+		return result, nil
+
+	default:
+		return nil, NewNCIInvalidDataError(
+			fmt.Sprintf("unexpected read response length: %d", len(payload)))
 	}
 }
 
@@ -1122,19 +1162,27 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 
 	// Process response - no retry loop, return errors immediately
 	for {
-		// Check for special response codes - NTAG arbiter busy
-		if len(resp) >= 5 && resp[3] == 0x03 {
-			// 0x03 = NTAG arbiter busy (locked to I2C interface)
-			if p.logCallback != nil {
-				p.logCallback(LogLevelDebug, "NTAG arbiter busy in write")
+		// Check if this is a CORE_CONN_CREDITS_NTF
+		if len(resp) >= 3 && resp[0] == 0x60 && resp[1] == 0x06 {
+			resp, err = p.handleCreditNotification()
+			if err != nil {
+				return err
 			}
-			return NewArbiterBusyError("NTAG arbiter busy")
+			continue
 		}
 
-		// For T2T, we expect an ACK (0x0A) response
-		if protocol == RFProtocolT2T {
-			if len(resp) >= 4 && resp[3] == 0x0A {
+		// A T2T WRITE is answered with a single ACK or NAK byte plus the
+		// trailing status byte, so the result code is only at payload[0] for a
+		// payload of that length.
+		if protocol == RFProtocolT2T && len(resp) == 3+t2tResultLen+1 {
+			switch resp[3] {
+			case t2tAck:
 				return nil
+			case t2tNakArbiter:
+				if p.logCallback != nil {
+					p.logCallback(LogLevelDebug, "NTAG arbiter busy in write")
+				}
+				return NewArbiterBusyError("NTAG arbiter busy")
 			}
 		}
 
@@ -1143,15 +1191,6 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 			if len(resp) >= 5 && resp[3] == 0x90 && resp[4] == 0x00 {
 				return nil
 			}
-		}
-
-		// Check if this is a CORE_CONN_CREDITS_NTF
-		if len(resp) >= 3 && resp[0] == 0x60 && resp[1] == 0x06 {
-			resp, err = p.handleCreditNotification()
-			if err != nil {
-				return err
-			}
-			continue
 		}
 
 		// If we get here, the response wasn't what we expected

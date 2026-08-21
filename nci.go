@@ -66,6 +66,20 @@ const (
 	nciStatusSemanticError uint8 = 0x06
 )
 
+// Type 2 Tag exchange results, as they arrive in the NCI DATA payload.
+//
+// The payload is the tag's own response followed by one NCI status byte, so a
+// READ that the tag answers normally is 16 data bytes plus the status, while
+// an ACK or a NAK is a single byte plus the status. The length is what tells
+// the two apart: the first payload byte of a successful READ is data, not a
+// result code.
+const (
+	t2tReadDataLen      = 16
+	t2tResultLen        = 1
+	t2tAck         byte = 0x0A
+	t2tNakArbiter  byte = 0x03 // NTAG arbiter is locked to the I2C side
+)
+
 // NCI parameter IDs
 const (
 	nciParamIDTotalDuration   uint16 = 0x0000
