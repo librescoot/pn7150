@@ -685,18 +685,7 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 		oid0 := resp[1] & 0x3F
 		if mt0 == nciMsgTypeNotification && gid0 == nciGroupRF && oid0 == nciRFDiscoverOID &&
 			resp[len(resp)-1] != 0x02 { // last notification
-			// resp points into rxBuf which the next transfer overwrites,
-			// so save the discovery data first.
-			savedResp := make([]byte, len(resp))
-			copy(savedResp, resp)
-			resp = savedResp
-
 			activateResp, _ = p.transferWithTimeout(nil, readTimeout)
-			if len(activateResp) > 0 {
-				savedActivate := make([]byte, len(activateResp))
-				copy(savedActivate, activateResp)
-				activateResp = savedActivate
-			}
 		}
 	}
 
@@ -865,6 +854,7 @@ func (p *PN7150) FullReinitialize() error {
 	}
 
 	// Stop tag event reader
+	wasReading := p.tagEventReaderRunning
 	if p.tagEventReaderRunning {
 		p.tagEventReaderRunning = false
 		close(p.tagEventReaderStop)
@@ -890,15 +880,20 @@ func (p *PN7150) FullReinitialize() error {
 		return err
 	}
 
-	// Restart tag event reader
-	p.tagEventReaderRunning = true
-	p.tagEventReaderDone.Add(1)
-	go func() {
-		defer p.tagEventReaderDone.Done()
-		p.tagEventReader()
-	}()
-	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "Tag event reader restarted after reinitialization")
+	// Restart the tag event reader only if it was running before the reinit.
+	// Starting it unconditionally hands a caller that never asked for it a
+	// background goroutine polling the same fd, racing whatever serialisation
+	// that caller does around its own register reads.
+	if wasReading {
+		p.tagEventReaderRunning = true
+		p.tagEventReaderDone.Add(1)
+		go func() {
+			defer p.tagEventReaderDone.Done()
+			p.tagEventReader()
+		}()
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, "Tag event reader restarted after reinitialization")
+		}
 	}
 
 	if p.logCallback != nil {
@@ -1365,6 +1360,17 @@ func (p *PN7150) awaitNotification(msgID uint16, timeoutMs uint) error {
 
 // transferWithTimeout performs a transfer with a specific timeout
 func (p *PN7150) transferWithTimeout(tx []byte, timeout time.Duration) ([]byte, error) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	return p.transferLocked(tx, timeout)
+}
+
+// transferLocked does the actual I/O. Caller must hold p.mutex: the receive
+// path parses into the shared p.rxBuf, and p.fd is read and written here.
+// Every message it returns is a copy, so callers can keep parsing after the
+// lock is dropped without the next transfer pulling the bytes out from under
+// them.
+func (p *PN7150) transferLocked(tx []byte, timeout time.Duration) ([]byte, error) {
 	if tx != nil {
 		if p.debug {
 			p.logNCI(tx, len(tx), "TX")
@@ -1603,7 +1609,7 @@ func (p *PN7150) transferWithTimeout(tx []byte, timeout time.Duration) ([]byte, 
 			gid := p.rxBuf[0] & 0x0F
 			oid := p.rxBuf[1] & 0x3F
 			if gid == nciGroupCore && oid == nciCoreConnCredits {
-				return p.rxBuf[:totalLen], nil
+				return p.copyRx(totalLen), nil
 			}
 			if p.logCallback != nil {
 				p.logCallback(LogLevelDebug, fmt.Sprintf("Skipping stale notification during data exchange: GID=%02x OID=%02x", gid, oid))
@@ -1613,13 +1619,13 @@ func (p *PN7150) transferWithTimeout(tx []byte, timeout time.Duration) ([]byte, 
 
 		// For command responses
 		if tx != nil && mt == nciMsgTypeResponse {
-			return p.rxBuf[:totalLen], nil
+			return p.copyRx(totalLen), nil
 		}
 
 		// For notifications
 		if mt == nciMsgTypeNotification {
 			if tx == nil {
-				return p.rxBuf[:totalLen], nil // Return notification when explicitly reading notifications
+				return p.copyRx(totalLen), nil // Return notification when explicitly reading notifications
 			}
 			// If we're expecting a response, ignore the notification and keep reading
 			continue
@@ -1627,7 +1633,7 @@ func (p *PN7150) transferWithTimeout(tx []byte, timeout time.Duration) ([]byte, 
 
 		// For data messages
 		if mt == nciMsgTypeData {
-			return p.rxBuf[:totalLen], nil
+			return p.copyRx(totalLen), nil
 		}
 	}
 }
@@ -1760,9 +1766,15 @@ func (p *PN7150) flushReadBuffer() error {
 
 // transfer performs an NCI transfer operation
 func (p *PN7150) transfer(tx []byte) ([]byte, error) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
 	return p.transferWithTimeout(tx, readTimeout)
+}
+
+// copyRx returns a copy of the first n bytes of the receive buffer.
+// Caller must hold p.mutex.
+func (p *PN7150) copyRx(n int) []byte {
+	out := make([]byte, n)
+	copy(out, p.rxBuf[:n])
+	return out
 }
 
 // tagEventReader is a goroutine that continuously monitors for tag arrival events
