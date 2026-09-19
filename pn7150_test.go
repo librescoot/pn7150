@@ -98,3 +98,28 @@ func TestParseT2TReadPayloadCopiesOut(t *testing.T) {
 		t.Error("result aliases the payload buffer")
 	}
 }
+
+func TestClassifyRFDeactivateResponse(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    uint8
+		wantWait  bool
+		wantError bool
+	}{
+		{name: "success awaits notification", status: nciStatusOK, wantWait: true},
+		{name: "already idle has no notification", status: nciStatusSemanticError},
+		{name: "other error rejected", status: 0x01, wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotWait, err := classifyRFDeactivateResponse(&nciResponse{Status: tt.status})
+			if (err != nil) != tt.wantError {
+				t.Fatalf("error = %v, wantError %t", err, tt.wantError)
+			}
+			if gotWait != tt.wantWait {
+				t.Errorf("wait = %t, want %t", gotWait, tt.wantWait)
+			}
+		})
+	}
+}

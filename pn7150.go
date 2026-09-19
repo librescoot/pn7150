@@ -487,6 +487,20 @@ func (p *PN7150) Close() {
 	}
 }
 
+// classifyRFDeactivateResponse reports whether a successful response started
+// an asynchronous deactivation whose notification must be consumed. A semantic
+// error is accepted because the controller is already idle; no new transition
+// (and therefore no matching notification) was started in that case.
+func classifyRFDeactivateResponse(resp *nciResponse) (bool, error) {
+	if isSuccessResponse(resp) {
+		return true, nil
+	}
+	if resp.Status == nciStatusSemanticError {
+		return false, nil
+	}
+	return false, NewNCIInvalidDataError(fmt.Sprintf("RF deactivate failed with status: %02x", resp.Status))
+}
+
 // StartDiscovery implements HAL.StartDiscovery
 func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 
@@ -513,9 +527,9 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 		return err
 	}
 
-	// Accept semantic error (means discovery was already stopped)
-	if !isSuccessResponse(nciResp) && nciResp.Status != nciStatusSemanticError {
-		return NewNCIInvalidDataError(fmt.Sprintf("RF deactivate failed with status: %02x", nciResp.Status))
+	deactivationStarted, err := classifyRFDeactivateResponse(nciResp)
+	if err != nil {
+		return err
 	}
 
 	// Deactivation succeeded — update state to idle so error paths are consistent
@@ -525,15 +539,19 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 	p.tagSelected = false
 	p.mutex.Unlock()
 
-	// Wait for and consume RF_DEACTIVATE_NTF before proceeding
-	// The PN7150 sends this notification asynchronously after the deactivate response
-	if err := p.AwaitReadable(1 * time.Second); err == nil {
-		ntfResp, ntfErr := p.transfer(nil)
-		if ntfErr == nil && len(ntfResp) >= 2 {
-			mt := (ntfResp[0] >> nciMsgTypeBit) & 0x03
-			oid := ntfResp[1] & 0x3F
-			if mt == nciMsgTypeNotification && oid == nciRFDeactivateOID {
-				p.logCallback(LogLevelDebug, "RF_DEACTIVATE_NTF received and consumed")
+	// A successful RF_DEACTIVATE_RSP starts an asynchronous transition and must
+	// be paired with its RF_DEACTIVATE_NTF before another command is sent. A
+	// semantic-error response means the controller was already idle, so this
+	// command did not start a transition and no matching notification is due.
+	if deactivationStarted {
+		if err := p.AwaitReadable(1 * time.Second); err == nil {
+			ntfResp, ntfErr := p.transfer(nil)
+			if ntfErr == nil && len(ntfResp) >= 2 {
+				mt := (ntfResp[0] >> nciMsgTypeBit) & 0x03
+				oid := ntfResp[1] & 0x3F
+				if mt == nciMsgTypeNotification && oid == nciRFDeactivateOID {
+					p.logCallback(LogLevelDebug, "RF_DEACTIVATE_NTF received and consumed")
+				}
 			}
 		}
 	}
