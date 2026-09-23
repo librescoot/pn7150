@@ -921,6 +921,55 @@ func (p *PN7150) FullReinitialize() error {
 	return nil
 }
 
+// ExchangeAPDU exchanges one short ISO-7816 APDU with an activated ISO-DEP
+// target. Discovery/selection must be complete before calling it. This is
+// deliberately distinct from ReadBinary: phones route on SELECT AID and do
+// not implement the READ BINARY command used for tags.
+func (p *PN7150) ExchangeAPDU(apdu []byte) ([]byte, error) {
+	if len(apdu) < 4 || len(apdu) > 255 {
+		return nil, fmt.Errorf("invalid short APDU length: %d", len(apdu))
+	}
+	p.mutex.Lock()
+	present := p.loadState() == statePresent && p.numTags == 1 &&
+		p.tags[0].RFProtocol == RFProtocolISODEP
+	selected := p.tagSelected
+	p.mutex.Unlock()
+	if !present {
+		return nil, NewNCIInvalidDataError("no ISO-DEP tag present")
+	}
+	if !selected {
+		if err := p.SelectTag(0); err != nil {
+			return nil, err
+		}
+	}
+
+	packet := make([]byte, 3+len(apdu))
+	packet[2] = byte(len(apdu))
+	copy(packet[3:], apdu)
+	// HCE may need to start an application process and sign with Keystore;
+	// the register-read timeout (250ms) is too short for a phone.
+	resp, err := p.transferWithTimeout(packet, 2*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	// The controller may notify us of connection credits before the DATA
+	// response. Never interpret a notification as an APDU response.
+	for len(resp) >= 3 && resp[0] == 0x60 && resp[1] == nciCoreConnCredits {
+		resp, err = p.transferWithTimeout(nil, 2*time.Second)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return parseAPDUData(resp)
+}
+
+func parseAPDUData(resp []byte) ([]byte, error) {
+	if len(resp) < 5 || resp[0] != 0 || resp[1] != 0 || int(resp[2]) != len(resp)-3 {
+		return nil, NewNCIInvalidDataError("invalid ISO-DEP DATA response")
+	}
+	return append([]byte(nil), resp[3:]...), nil
+}
+
 // ReadBinary implements HAL.ReadBinary
 func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 
