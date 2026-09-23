@@ -103,7 +103,7 @@ func TestParseT2TReadPayloadCopiesOut(t *testing.T) {
 }
 
 func TestParseRFDiscoverTag(t *testing.T) {
-	frame := []byte{0x61, 0x03, 0x0b, 0x01, byte(RFProtocolT2T), 0x00, 0x00, 0x00, 0x00, 0x04, 0x11, 0x22, 0x33, 0x44, 0x00}
+	frame := []byte{0x61, 0x03, 0x0c, 0x01, byte(RFProtocolT2T), 0x00, 0x00, 0x00, 0x00, 0x04, 0x11, 0x22, 0x33, 0x44, 0x00}
 	tag, err := parseRFDiscoverTag(frame)
 	if err != nil {
 		t.Fatal(err)
@@ -118,14 +118,19 @@ func TestParseRFDiscoverTag(t *testing.T) {
 }
 
 func TestParseRFDiscoverTagRejectsInvalidUIDLength(t *testing.T) {
-	frame := []byte{0x61, 0x03, 0x08, 0x01, byte(RFProtocolT2T), 0x00, 0x00, 0x00, 0x00, 0x04, 0x11, 0x22}
+	frame := []byte{0x61, 0x03, 0x09, 0x01, byte(RFProtocolT2T), 0x00, 0x00, 0x00, 0x00, 0x04, 0x11, 0x22}
 	zeroUID := append([]byte(nil), frame...)
 	zeroUID[9] = 0
+	badFrameLength := append([]byte(nil), frame...)
+	badFrameLength[2] = 0x08
+	oversizedUID := append(append([]byte(nil), frame[:9]...), 0x0b, 0x00)
+	oversizedUID[2] = 0x08
 	for name, input := range map[string][]byte{
-		"missing UID length": frame[:9],
-		"truncated UID":      frame,
-		"zero UID":           zeroUID,
-		"oversized UID":      append(append([]byte(nil), frame[:9]...), 0x0b, 0x00),
+		"missing UID length":  frame[:9],
+		"truncated UID":       frame,
+		"zero UID":            zeroUID,
+		"oversized UID":       oversizedUID,
+		"inconsistent length": badFrameLength,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseRFDiscoverTag(input); err == nil {

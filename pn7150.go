@@ -686,7 +686,7 @@ func (p *PN7150) GetState() State {
 }
 
 func parseRFDiscoverTag(resp []byte) (Tag, error) {
-	if len(resp) < 11 {
+	if len(resp) < 11 || len(resp) != int(resp[2])+3 {
 		return Tag{}, NewNCIInvalidDataError("invalid RF_DISCOVER_NTF length")
 	}
 	uidLen := int(resp[9])
