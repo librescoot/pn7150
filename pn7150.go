@@ -685,6 +685,20 @@ func (p *PN7150) GetState() State {
 	return State(p.loadState())
 }
 
+func parseRFDiscoverTag(resp []byte) (Tag, error) {
+	if len(resp) < 11 {
+		return Tag{}, NewNCIInvalidDataError("invalid RF_DISCOVER_NTF length")
+	}
+	uidLen := int(resp[9])
+	if uidLen == 0 || uidLen > maxUIDSize || 10+uidLen >= len(resp) {
+		return Tag{}, NewNCIInvalidDataError("invalid RF_DISCOVER_NTF UID length")
+	}
+	return Tag{
+		RFProtocol: RFProtocol(resp[4]),
+		ID:         append([]byte(nil), resp[10:10+uidLen]...),
+	}, nil
+}
+
 // DetectTags implements HAL.DetectTags
 func (p *PN7150) DetectTags() ([]Tag, error) {
 	resp, err := p.transfer(nil)
@@ -749,7 +763,6 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 			return nil, fmt.Errorf("invalid RF_DISCOVER_NTF length")
 		}
 
-		rfProtocol := resp[4]
 		rfTech := resp[5]
 
 		if rfTech != nciRFTechNFCAPassivePoll {
@@ -760,12 +773,9 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 		}
 
 		if p.numTags < maxTags {
-			tag := Tag{
-				RFProtocol: RFProtocol(rfProtocol),
-			}
-			if len(resp) >= 10 && resp[9] <= maxUIDSize {
-				tag.ID = make([]byte, resp[9])
-				copy(tag.ID, resp[10:10+resp[9]])
+			tag, err := parseRFDiscoverTag(resp)
+			if err != nil {
+				return nil, err
 			}
 			p.tags[p.numTags] = tag
 			p.numTags++

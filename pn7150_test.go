@@ -99,6 +99,39 @@ func TestParseT2TReadPayloadCopiesOut(t *testing.T) {
 	}
 }
 
+func TestParseRFDiscoverTag(t *testing.T) {
+	frame := []byte{0x61, 0x03, 0x0b, 0x01, byte(RFProtocolT2T), 0x00, 0x00, 0x00, 0x00, 0x04, 0x11, 0x22, 0x33, 0x44, 0x00}
+	tag, err := parseRFDiscoverTag(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag.RFProtocol != RFProtocolT2T || hex.EncodeToString(tag.ID) != "11223344" {
+		t.Fatalf("tag = %+v", tag)
+	}
+	frame[10] = 0xff
+	if tag.ID[0] != 0x11 {
+		t.Fatal("UID aliases receive frame")
+	}
+}
+
+func TestParseRFDiscoverTagRejectsInvalidUIDLength(t *testing.T) {
+	frame := []byte{0x61, 0x03, 0x08, 0x01, byte(RFProtocolT2T), 0x00, 0x00, 0x00, 0x00, 0x04, 0x11, 0x22}
+	zeroUID := append([]byte(nil), frame...)
+	zeroUID[9] = 0
+	for name, input := range map[string][]byte{
+		"missing UID length": frame[:9],
+		"truncated UID":      frame,
+		"zero UID":           zeroUID,
+		"oversized UID":      append(append([]byte(nil), frame[:9]...), 0x0b, 0x00),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseRFDiscoverTag(input); err == nil {
+				t.Fatal("expected malformed frame error")
+			}
+		})
+	}
+}
+
 func TestClassifyRFDeactivateResponse(t *testing.T) {
 	tests := []struct {
 		name      string
