@@ -2014,15 +2014,20 @@ func (p *PN7150) AwaitReadable(timeout time.Duration) error {
 	}
 
 	timeoutMs := int(timeout.Milliseconds())
-	n, err := unix.Poll([]unix.PollFd{pfd}, timeoutMs)
+	fds := []unix.PollFd{pfd}
+	n, err := unix.Poll(fds, timeoutMs)
 	if err != nil {
-		return fmt.Errorf("poll error: %w", err)
+		return NewI2CPollError("poll error", err)
 	}
-
 	if n == 0 {
-		return fmt.Errorf("timeout waiting for NFC device to become readable")
+		return NewI2CTimeoutError("timeout waiting for NFC device to become readable")
 	}
-
+	if fds[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+		return NewI2CPollError(fmt.Sprintf("NFC device poll flags: %#x", fds[0].Revents), nil)
+	}
+	if fds[0].Revents&unix.POLLIN == 0 {
+		return NewI2CPollError(fmt.Sprintf("NFC device not readable: %#x", fds[0].Revents), nil)
+	}
 	return nil
 }
 

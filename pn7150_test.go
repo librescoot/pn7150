@@ -2,7 +2,10 @@ package hal
 
 import (
 	"encoding/hex"
+	"errors"
+	"os"
 	"testing"
+	"time"
 )
 
 // Payloads captured from a live PN7150 on an i.MX6 MDB talking to a battery
@@ -130,6 +133,36 @@ func TestParseRFDiscoverTagRejectsInvalidUIDLength(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAwaitReadablePollResults(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+
+	p := &PN7150{fd: int(reader.Fd())}
+	checkCode := func(want int) {
+		t.Helper()
+		err := p.AwaitReadable(0)
+		var nfcErr NFCError
+		if !errors.As(err, &nfcErr) || nfcErr.Code() != want {
+			t.Fatalf("AwaitReadable error = %v, want code %d", err, want)
+		}
+	}
+	checkCode(ErrCodeI2CTimeout)
+	if _, err := writer.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.AwaitReadable(time.Millisecond); err != nil {
+		t.Fatalf("readable pipe: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	checkCode(ErrCodeI2CPoll)
 }
 
 func TestClassifyRFDeactivateResponse(t *testing.T) {
