@@ -1,5 +1,11 @@
 package hal
 
+import (
+	"errors"
+	"fmt"
+	"syscall"
+)
+
 // Error codes
 const (
 	// Application error codes
@@ -85,8 +91,29 @@ type i2cError struct {
 	cause error
 }
 
+// Error renders the underlying cause so the syscall error that produced an I2C
+// failure survives into logs and fault descriptions, not just the context
+// message. A syscall errno keeps its numeric value for precise diagnosis.
+func (e *i2cError) Error() string {
+	if cause := describeCause(e.cause); cause != "" {
+		return e.message + ": " + cause
+	}
+	return e.message
+}
+
 func (e *i2cError) IsHALError() bool {
 	return true
+}
+
+func describeCause(cause error) string {
+	if cause == nil {
+		return ""
+	}
+	var errno syscall.Errno
+	if errors.As(cause, &errno) {
+		return fmt.Sprintf("%s (errno %d)", errno.Error(), int(errno))
+	}
+	return cause.Error()
 }
 
 func (e *i2cError) IsI2CError() bool {
