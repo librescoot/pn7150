@@ -6,6 +6,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Payloads captured from a live PN7150 on an i.MX6 MDB talking to a battery
@@ -168,6 +170,44 @@ func TestAwaitReadablePollResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkCode(ErrCodeI2CPoll)
+}
+
+func TestPollUntilDeadlineRetriesInterruptedWait(t *testing.T) {
+	calls := 0
+	n, err := pollUntilDeadline(nil, time.Second, func(_ []unix.PollFd, timeoutMs int) (int, error) {
+		calls++
+		if timeoutMs <= 0 || timeoutMs > 1000 {
+			t.Fatalf("invalid timeout: %d", timeoutMs)
+		}
+		if calls < 3 {
+			return -1, unix.EINTR
+		}
+		return 1, nil
+	})
+	if n != 1 || err != nil || calls != 3 {
+		t.Fatalf("n = %d, error = %v, calls = %d", n, err, calls)
+	}
+}
+
+func TestPollUntilDeadlineDoesNotExtendTimeout(t *testing.T) {
+	calls := 0
+	n, err := pollUntilDeadline(nil, time.Millisecond, func(_ []unix.PollFd, _ int) (int, error) {
+		calls++
+		time.Sleep(5 * time.Millisecond)
+		return -1, unix.EINTR
+	})
+	if n != 0 || err != nil || calls != 1 {
+		t.Fatalf("n = %d, error = %v, calls = %d", n, err, calls)
+	}
+}
+
+func TestPollUntilDeadlinePreservesErrors(t *testing.T) {
+	_, err := pollUntilDeadline(nil, time.Second, func(_ []unix.PollFd, _ int) (int, error) {
+		return -1, unix.EIO
+	})
+	if !errors.Is(err, unix.EIO) {
+		t.Fatalf("error = %v, want EIO", err)
+	}
 }
 
 func TestClassifyRFDeactivateResponse(t *testing.T) {

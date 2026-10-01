@@ -2062,9 +2062,8 @@ func (p *PN7150) AwaitReadable(timeout time.Duration) error {
 		Events: unix.POLLIN,
 	}
 
-	timeoutMs := int(timeout.Milliseconds())
 	fds := []unix.PollFd{pfd}
-	n, err := unix.Poll(fds, timeoutMs)
+	n, err := pollUntilDeadline(fds, timeout, unix.Poll)
 	if err != nil {
 		return NewI2CPollError("poll error", err)
 	}
@@ -2078,6 +2077,24 @@ func (p *PN7150) AwaitReadable(timeout time.Duration) error {
 		return NewI2CPollError(fmt.Sprintf("NFC device not readable: %#x", fds[0].Revents), nil)
 	}
 	return nil
+}
+
+func pollUntilDeadline(fds []unix.PollFd, timeout time.Duration, poll func([]unix.PollFd, int) (int, error)) (int, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		timeoutMs := -1
+		if timeout >= 0 {
+			remaining := max(time.Until(deadline), 0)
+			timeoutMs = int((remaining + time.Millisecond - 1) / time.Millisecond)
+		}
+		n, err := poll(fds, timeoutMs)
+		if err != unix.EINTR {
+			return n, err
+		}
+		if timeout >= 0 && !time.Now().Before(deadline) {
+			return 0, nil
+		}
+	}
 }
 
 // probeCardPresent checks whether the currently detected card is still physically
