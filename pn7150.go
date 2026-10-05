@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	nciBufferSize = 256
+	nciBufferSize = 3 + 255 // NCI header plus maximum payload
 	maxTags       = 10
 	maxRetries    = 3
 	readTimeout   = 250 * time.Millisecond
@@ -503,7 +503,10 @@ func classifyRFDeactivateResponse(resp *nciResponse) (bool, error) {
 
 // StartDiscovery implements HAL.StartDiscovery
 func (p *PN7150) StartDiscovery(pollPeriod uint) error {
+	return p.startDiscovery(pollPeriod, buildRFDiscoverCmd())
+}
 
+func (p *PN7150) startDiscovery(pollPeriod uint, discoverCmd []byte) error {
 	currentState := p.loadState()
 
 	if currentState == stateUninitialized || currentState == stateInitializing {
@@ -615,7 +618,6 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 	}
 
 	// Start RF discovery
-	discoverCmd := buildRFDiscoverCmd()
 	resp, err = p.transfer(discoverCmd)
 	if err != nil {
 		return err

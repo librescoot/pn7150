@@ -82,6 +82,15 @@ for event := range nfcHAL.GetTagEventChannel() {
 }
 ```
 
+## Card inspection tool
+
+[`nfc-inspect`](cmd/nfc-inspect/README.md) is a standalone diagnostic CLI for
+the MDB-connected keycard reader. It captures activation metadata, card-reported
+versions, raw exchanges and accessible public data, with human and JSONL reports.
+Memory reads are opt-in because cards can increment counters even on reads.
+Exclusive reader access is required; the tool never stops services or unlocks a
+vehicle. See its README for build instructions, safety checks and coverage limits.
+
 ## Architecture
 
 ### Core Components
