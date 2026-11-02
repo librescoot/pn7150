@@ -701,165 +701,14 @@ func parseRFDiscoverTag(resp []byte) (Tag, error) {
 	}, nil
 }
 
-// DetectTags implements HAL.DetectTags
+// DetectTags preserves the legacy API. A nil list is not proof of absence;
+// callers needing discovery progress should use PollDiscovery.
 func (p *PN7150) DetectTags() ([]Tag, error) {
-	resp, err := p.transfer(nil)
+	result, err := p.PollDiscovery()
 	if err != nil {
 		return nil, err
 	}
-
-	// Before acquiring the mutex, check if this is a single-tag RF_DISCOVER_NTF
-	// (last notification). The PN7150 auto-activates single tags and sends
-	// RF_INTF_ACTIVATED_NTF immediately after — read it now so the tag is
-	// properly activated and no stale notification is left pending.
-	var activateResp []byte
-	if len(resp) >= 7 {
-		mt0 := (resp[0] >> nciMsgTypeBit) & 0x03
-		gid0 := resp[0] & 0x0F
-		oid0 := resp[1] & 0x3F
-		if mt0 == nciMsgTypeNotification && gid0 == nciGroupRF && oid0 == nciRFDiscoverOID &&
-			resp[len(resp)-1] != 0x02 { // last notification
-			activateResp, _ = p.transferWithTimeout(nil, readTimeout)
-		}
-	}
-
-	// Hold mutex for all state access after transfer
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-
-	if len(resp) == 0 {
-		if p.loadState() == statePresent && p.numTags > 0 {
-			return p.copyTags(), nil
-		}
-		return nil, nil
-	}
-
-	if len(resp) < 3 {
-		return nil, fmt.Errorf("incomplete NCI header")
-	}
-
-	mt := (resp[0] >> nciMsgTypeBit) & 0x03
-	gid := resp[0] & 0x0F
-	oid := resp[1] & 0x3F
-
-	if mt == nciMsgTypeNotification && gid == nciGroupStatus {
-		if p.logCallback != nil {
-			p.logCallback(LogLevelDebug, fmt.Sprintf("Status notification received: %02x %02x", oid, resp[2]))
-		}
-		if p.loadState() == statePresent && p.numTags > 0 {
-			return p.copyTags(), nil
-		}
-		return nil, nil
-	}
-
-	if mt != nciMsgTypeNotification || gid != nciGroupRF {
-		if p.loadState() == statePresent && p.numTags > 0 {
-			return p.copyTags(), nil
-		}
-		return nil, nil
-	}
-
-	switch oid {
-	case nciRFDiscoverOID:
-		if len(resp) < 7 {
-			return nil, fmt.Errorf("invalid RF_DISCOVER_NTF length")
-		}
-
-		rfTech := resp[5]
-
-		if rfTech != nciRFTechNFCAPassivePoll {
-			if p.logCallback != nil {
-				p.logCallback(LogLevelDebug, fmt.Sprintf("Ignoring unsupported technology: tech=%02x", rfTech))
-			}
-			return nil, nil
-		}
-
-		if p.numTags < maxTags {
-			tag, err := parseRFDiscoverTag(resp)
-			if err != nil {
-				return nil, err
-			}
-			p.tags[p.numTags] = tag
-			p.numTags++
-
-			if p.logCallback != nil {
-				p.logCallback(LogLevelDebug, fmt.Sprintf("Tag discovered: protocol=%s, uid_len=%d, uid=%X", tag.RFProtocol, len(tag.ID), tag.ID))
-			}
-		}
-
-		if resp[len(resp)-1] == 0x02 {
-			return nil, nil
-		}
-
-		if p.numTags > 1 {
-			if p.logCallback != nil {
-				p.logCallback(LogLevelError, fmt.Sprintf("Multiple tags detected: %d (not supported)", p.numTags))
-			}
-			p.numTags = 0
-			p.storeState(stateDiscovering)
-			p.tagSelected = false
-			return nil, NewMultipleTagsError("multiple tags not supported")
-		}
-
-		// Single tag discovered. Check if we got the auto-activation notification.
-		if len(activateResp) >= 3 {
-			activateMT := (activateResp[0] >> nciMsgTypeBit) & 0x03
-			activateGID := activateResp[0] & 0x0F
-			activateOID := activateResp[1] & 0x3F
-			if activateMT == nciMsgTypeNotification && activateGID == nciGroupRF && activateOID == nciRFIntfActivatedOID {
-				tag, err := parseRFIntfActivatedNtf(activateResp)
-				if err == nil {
-					p.storeState(statePresent)
-					p.numTags = 1
-					p.tags[0] = *tag
-					p.tagSelected = true
-					if p.logCallback != nil {
-						p.logCallback(LogLevelDebug, fmt.Sprintf("Tag auto-activated after discovery: %X", tag.ID))
-					}
-					return []Tag{*tag}, nil
-				}
-			}
-		}
-
-		// Auto-activation not received — tag discovered but not activated
-		p.storeState(statePresent)
-		p.tagSelected = false
-		return p.copyTags(), nil
-
-	case nciRFIntfActivatedOID:
-		tag, err := parseRFIntfActivatedNtf(resp)
-		if err != nil {
-			return nil, err
-		}
-		p.storeState(statePresent)
-		p.numTags = 1
-		p.tags[0] = *tag
-		p.tagSelected = true
-
-		return []Tag{*tag}, nil
-
-	case nciRFDeactivateOID:
-		if p.logCallback != nil {
-			p.logCallback(LogLevelDebug, "RF_DEACTIVATE_NTF received")
-		}
-		p.numTags = 0
-		p.storeState(stateDiscovering)
-		p.tagSelected = false
-	}
-
-	if p.loadState() == statePresent && p.numTags > 0 {
-		if p.numTags > 1 {
-			if p.logCallback != nil {
-				p.logCallback(LogLevelError, fmt.Sprintf("Multiple tags present: %d (not supported)", p.numTags))
-			}
-			p.numTags = 0
-			p.storeState(stateDiscovering)
-			p.tagSelected = false
-			return nil, NewMultipleTagsError("multiple tags not supported")
-		}
-		return p.copyTags(), nil
-	}
-	return nil, nil
+	return result.Tags, nil
 }
 
 // copyTags returns a copy of the current tags slice.
@@ -1515,7 +1364,8 @@ func (p *PN7150) transferLocked(tx []byte, timeout time.Duration) ([]byte, error
 			timeoutMs = 1
 		}
 
-		n, err := unix.Poll([]unix.PollFd{pfd}, timeoutMs)
+		pollFDs := []unix.PollFd{pfd}
+		n, err := unix.Poll(pollFDs, timeoutMs)
 		if err != nil {
 			if err == unix.EINTR {
 				continue
@@ -1527,6 +1377,9 @@ func (p *PN7150) transferLocked(tx []byte, timeout time.Duration) ([]byte, error
 				return nil, nil // No notifications available
 			}
 			continue // Keep waiting for response
+		}
+		if events := pollFDs[0].Revents; events&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+			return nil, NewI2CPollError(fmt.Sprintf("I2C poll failure: revents=%#x", events), nil)
 		}
 
 		// Read header first with retry logic for NACK handling
@@ -1571,11 +1424,7 @@ func (p *PN7150) transferLocked(tx []byte, timeout time.Duration) ([]byte, error
 		}
 
 		if readN == 0 {
-			// Zero-length read - treat as no data available
-			if tx == nil {
-				return nil, nil // No notifications available
-			}
-			continue // Keep waiting for response
+			return nil, NewI2CReadError("zero-length I2C header read", nil)
 		}
 
 		if readN != 3 {

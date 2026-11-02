@@ -82,6 +82,31 @@ for event := range nfcHAL.GetTagEventChannel() {
 }
 ```
 
+## Synchronous discovery observations
+
+`PN7150.PollDiscovery()` returns a `DiscoveryResult` and an error. It is available
+through the optional `DiscoveryPoller` interface; the existing `HAL` interface
+and `DetectTags()` API remain available.
+
+- `DiscoveryQuiet`: the receive wait ended without a notification. This is not
+  a completed RF scan or proof that a tag was removed.
+- `DiscoveryPending`: discovery is incomplete or another notification arrived.
+- `DiscoveryTags`: a complete tag list is available. `Cached` distinguishes a
+  remembered selection from a new discovery/activation notification.
+- `DiscoveryDeactivated`: the RF link changed state. The result preserves the
+  deactivation type and reason, including host-requested transitions.
+- Errors: transport failures, malformed messages, controller reset and generic
+  or interface error notifications. An activation follow-up error is not hidden
+  behind a previously discovered tag.
+
+Use synchronous discovery with exclusive controller ownership and the async tag
+reader disabled. The caller owns the overall search deadline and absence policy.
+The PN7150 does not report completion of each empty RF polling cycle, and RF
+visibility does not establish an application's electrical connection state.
+See [UM10936](https://www.nxp.com/docs/en/user-guide/UM10936.pdf), sections 6.3.3,
+9.1 and 9.6.2: `TOTAL_DURATION` controls the listen/pause phase, and the proprietary
+presence-check command applies to ISO-DEP/NFC-DEP, not Type-2 tags.
+
 ## Card inspection tool
 
 [`nfc-inspect`](cmd/nfc-inspect/README.md) is a standalone diagnostic CLI for
