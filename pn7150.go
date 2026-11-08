@@ -116,6 +116,13 @@ func (p *PN7150) logNCI(buf []byte, size int, direction string) {
 	}
 }
 
+func tagDetectorSetting(enabled bool) byte {
+	if enabled {
+		return 1
+	}
+	return 0
+}
+
 func (p *PN7150) Initialize() error {
 	if !p.atomicState.CompareAndSwap(int32(stateUninitialized), int32(stateInitializing)) {
 		return fmt.Errorf("invalid state for initialization: %s", p.loadState())
@@ -220,9 +227,9 @@ func (p *PN7150) Initialize() error {
 	}
 
 	params := []nciParam{
-		{0xA003, []byte{0x08}},             // CLOCK_SEL_CFG: 27.12 MHz crystal
-		{0xA00E, []byte{0x02, 0x09, 0x00}}, // PMU_CFG
-		{0xA040, []byte{0x01}},             // TAG_DETECTOR_CFG
+		{0xA003, []byte{0x08}},                              // CLOCK_SEL_CFG: 27.12 MHz crystal
+		{0xA00E, []byte{0x02, 0x09, 0x00}},                  // PMU_CFG
+		{0xA040, []byte{tagDetectorSetting(p.lpcdEnabled)}}, // TAG_DETECTOR_CFG
 	}
 
 	needsParamWrite := false

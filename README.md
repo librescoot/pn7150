@@ -143,7 +143,7 @@ The PN7150 is configured with:
 - 27.12 MHz crystal clock
 - Custom RF transition table for optimal performance
 - PMU configuration for power management
-- Tag detector configuration
+- Tag detector configuration, enabled or disabled by the `lpcdEnabled` constructor argument. The controller's existing threshold, fallback and retry settings are left unchanged.
 
 ## License
 

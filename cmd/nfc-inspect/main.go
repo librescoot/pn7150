@@ -147,7 +147,7 @@ func run(ctx context.Context, o options, stdout, stderr io.Writer) error {
 		if o.debug || level <= hal.LogLevelWarning {
 			fmt.Fprintf(stderr, "%s: %s\n", level, msg)
 		}
-	}, nil, false, false, o.debug)
+	}, nil, false, true, o.debug)
 	if err != nil {
 		return err
 	}
